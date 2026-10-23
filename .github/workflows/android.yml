@@ -1,0 +1,87 @@
+name: Android build and release
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install Android SDK packages
+        run: sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+      - name: Validate release version
+        id: version
+        shell: bash
+        run: |
+          version=1.0.0
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]] || exit 1
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+      - name: Test, lint, build APK and publish SDK to staging repository
+        run: ./gradlew --no-daemon test lint assembleDebug assembleRelease :ir-sdk:publishReleasePublicationToLocalReleaseRepository -PreleaseVersion="$RELEASE_VERSION"
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.value }}
+      - name: Package release files
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/ir-remote-debug.apk
+          cp app/build/outputs/apk/release/app-release-unsigned.apk dist/ir-remote-release-unsigned.apk
+          cp ir-sdk/build/outputs/aar/ir-sdk-release.aar dist/ir-sdk.aar
+          (cd ir-sdk/build/maven && zip -r ../../../dist/ir-sdk-maven.zip .)
+          (cd dist && sha256sum *.apk *.aar *.zip > SHA256SUMS)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-distribution
+          path: dist/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: validation-reports
+          path: |
+            app/build/reports/
+            ir-sdk/build/reports/
+          if-no-files-found: ignore
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: android-distribution
+          path: dist
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          cat > /tmp/release-notes.md <<'NOTES'
+          Android IR Remote and reusable IR SDK.
+
+          Install ir-remote-debug.apk for testing (development signed). The release APK is unsigned and must be signed with your own stable key before installation/distribution. Debug signing keys can differ between CI runs; uninstalling an older build may be necessary and deletes saved buttons.
+
+          ir-sdk.aar is the Android library; ir-sdk-maven.zip includes Maven metadata and sources. SHA256SUMS contains artifact checksums.
+          NOTES
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "$GITHUB_REF_NAME" --notes-file /tmp/release-notes.md
+          fi

@@ -1,0 +1,20 @@
+plugins { id 'com.android.library'; id 'maven-publish' }
+android {
+    namespace 'com.slimshady.irsdk'
+    compileSdk 35
+    defaultConfig { minSdk 26; testInstrumentationRunner 'android.test.InstrumentationTestRunner' }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+    publishing { singleVariant('release') { withSourcesJar() } }
+}
+dependencies { testImplementation 'junit:junit:4.13.2' }
+afterEvaluate {
+    publishing {
+        publications { release(MavenPublication) {
+            from components.release
+            groupId = 'com.slimshady'
+            artifactId = 'ir-sdk'
+            version = providers.gradleProperty('releaseVersion').getOrElse('1.0.0')
+        } }
+        repositories { maven { name = 'localRelease'; url = layout.buildDirectory.dir('maven') } }
+    }
+}

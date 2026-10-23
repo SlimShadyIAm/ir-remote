@@ -1,0 +1,8 @@
+plugins { id 'com.android.application' }
+android {
+    namespace 'com.slimshady.irremote'
+    compileSdk 35
+    defaultConfig { applicationId 'com.slimshady.irremote'; minSdk 26; targetSdk 35; versionCode 1; versionName providers.gradleProperty('releaseVersion').getOrElse('1.0.0') }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+}
+dependencies { implementation project(':ir-sdk') }
