@@ -2,6 +2,8 @@
 
 Native Android 8.0+ app and a reusable Java Android IR SDK. Create named buttons with a custom carrier frequency in **Hz** and a raw alternating ON/OFF pattern in **microseconds**, beginning with ON. Saved buttons can be sent, edited, or deleted and persist locally across app restarts. No Internet permission, account, or remote service is needed.
 
+Touch and hold **Send** to repeat the saved signal, with a 100 ms gap after each completed transmission. Release, slide outside the button, or leave the app to stop. A signal already handed to Android finishes before stopping; transmissions never overlap or build up in a queue. A normal tap sends once. Accessibility/keyboard clicks also send once. Repeating resends the full saved pattern; some appliance protocols need a distinct repeat frame, which is not generated automatically.
+
 ## OnePlus compatibility
 
 The app checks Android's `ConsumerIrManager` at runtime and displays the emitter status and reported carrier ranges. It works on the OnePlus Nord 6 **if its firmware exposes the IR blaster through this public API**. Hardware compatibility has not been verified on a physical Nord 6. If firmware hides the emitter, this app cannot enable it. No root or private OnePlus API is used.

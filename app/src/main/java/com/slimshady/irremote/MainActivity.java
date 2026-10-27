@@ -3,10 +3,13 @@ package com.slimshady.irremote;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.graphics.Color;
 import android.hardware.ConsumerIrManager;
 import android.text.InputType;
 import android.view.View;
+import android.view.MotionEvent;
 import android.view.WindowInsets;
 import android.widget.*;
 import com.slimshady.irsdk.*;
@@ -18,13 +21,29 @@ public final class MainActivity extends Activity {
     private IrTransmitter transmitter;
     private JSONArray buttons;
     private LinearLayout content;
-    private boolean busy;
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private RepeatSender<IrSignal> repeatSender;
+    private Button heldButton;
+    private int heldPointer = -1;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private static final String STORE = "buttons";
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         transmitter = new IrTransmitter(this);
+        repeatSender = new RepeatSender<>(new RepeatSender.Scheduler() {
+            public void postDelayed(Runnable task, long delayMs) { handler.postDelayed(task, delayMs); }
+            public void removeCallbacks(Runnable task) { handler.removeCallbacks(task); }
+        }, (signal, completion) -> worker.execute(() -> {
+            RuntimeException failure = null;
+            try { transmitter.transmit(signal); }
+            catch (RuntimeException e) { failure = e; }
+            RuntimeException result = failure;
+            handler.post(() -> completion.accept(result));
+        }), error -> {
+            stopHolding();
+            if (!isFinishing() && !isDestroyed()) toast("Could not send: " + error.getMessage());
+        });
         try { buttons = new JSONArray(getPreferences(0).getString(STORE, "[]")); }
         catch (JSONException e) { buttons = new JSONArray(); toast("Saved button data could not be read."); }
         render();
@@ -38,6 +57,7 @@ public final class MainActivity extends Activity {
         Button view = new Button(this); view.setText(label); view.setAllCaps(false); view.setOnClickListener(action); return view;
     }
     private void render() {
+        stopHolding();
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true); scroll.setBackgroundColor(Color.rgb(17, 23, 34));
         content = new LinearLayout(this); content.setOrientation(LinearLayout.VERTICAL);
@@ -66,7 +86,8 @@ public final class MainActivity extends Activity {
             content.addView(text(entry.optString("name"), 20));
             content.addView(text(entry.optString("frequency") + " Hz · " + entry.optString("pattern").split("[\\s,;]+").length + " durations", 14));
             LinearLayout actions = new LinearLayout(this);
-            Button send = button("Send", v -> send(index));
+            Button send = new SendButton(index);
+            send.setContentDescription("Send " + entry.optString("name") + ". Touch and hold to repeat.");
             try { send.setEnabled(transmitter.isAvailable()); } catch (RuntimeException e) { send.setEnabled(false); }
             actions.addView(send); actions.addView(button("Edit", v -> edit(index)));
             actions.addView(button("Delete", v -> new AlertDialog.Builder(this).setTitle("Delete button?")
@@ -107,22 +128,83 @@ public final class MainActivity extends Activity {
         }));
         dialog.show();
     }
-    private void send(int index) {
-        if (busy) { toast("A signal is already being sent."); return; }
+    private IrSignal signalAt(int index) {
         JSONObject entry = buttons.optJSONObject(index);
+        return IrSignal.parse(entry.optString("frequency"), entry.optString("pattern"));
+    }
+    private void send(int index) {
         try {
-            IrSignal signal = IrSignal.parse(entry.optString("frequency"), entry.optString("pattern"));
-            busy = true;
-            worker.execute(() -> {
-                String result;
-                try { transmitter.transmit(signal); result = "Signal submitted to IR hardware."; }
-                catch (RuntimeException e) { result = "Could not send: " + e.getMessage(); }
-                String message = result;
-                runOnUiThread(() -> { busy = false; if (!isFinishing() && !isDestroyed()) toast(message); });
-            });
+            if (!repeatSender.sendOnce(signalAt(index))) toast("A signal is already being sent.");
         } catch (IllegalArgumentException e) { toast(e.getMessage()); }
+    }
+    private final class SendButton extends Button {
+        private final int index;
+        private boolean touchReleaseClick;
+        SendButton(int index) {
+            super(MainActivity.this);
+            this.index = index;
+            setText(R.string.send);
+            setAllCaps(false);
+            setOnClickListener(v -> { if (!touchReleaseClick) send(index); });
+        }
+        @Override public boolean performClick() { return super.performClick(); }
+        @Override public boolean onTouchEvent(MotionEvent event) {
+            Button button = this;
+            if (!button.isEnabled()) return false;
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    if (heldButton != null) return true;
+                    try {
+                        IrSignal signal = signalAt(index);
+                        heldButton = button;
+                        heldPointer = event.getPointerId(0);
+                        button.setPressed(true);
+                        button.getParent().requestDisallowInterceptTouchEvent(true);
+                        repeatSender.start(signal);
+                    } catch (IllegalArgumentException e) { stopHolding(); toast(e.getMessage()); }
+                    return true;
+                case MotionEvent.ACTION_MOVE:
+                    if (heldButton == button) {
+                        int pointer = event.findPointerIndex(heldPointer);
+                        if (pointer < 0 || event.getX(pointer) < 0 || event.getX(pointer) >= button.getWidth()
+                            || event.getY(pointer) < 0 || event.getY(pointer) >= button.getHeight()) stopHolding();
+                    }
+                    return true;
+                case MotionEvent.ACTION_POINTER_UP:
+                    if (heldButton == button && event.getPointerId(event.getActionIndex()) == heldPointer) stopHolding();
+                    return true;
+                case MotionEvent.ACTION_UP:
+                    boolean clicked = heldButton == button;
+                    if (clicked) stopHolding();
+                    // Announce the click for accessibility without sending again on release.
+                    if (clicked) {
+                        touchReleaseClick = true;
+                        try { button.performClick(); } finally { touchReleaseClick = false; }
+                    }
+                    return true;
+                case MotionEvent.ACTION_CANCEL:
+                    if (heldButton == button) stopHolding();
+                    return true;
+                default:
+                    return true;
+            }
+        }
+    }
+    private void stopHolding() {
+        if (repeatSender != null) repeatSender.stop();
+        if (heldButton != null) {
+            heldButton.setPressed(false);
+            heldButton.getParent().requestDisallowInterceptTouchEvent(false);
+            heldButton = null;
+        }
+        heldPointer = -1;
+    }
+    @Override protected void onPause() { stopHolding(); super.onPause(); }
+    @Override public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (!hasFocus) stopHolding();
     }
     private void persist() { getPreferences(0).edit().putString(STORE, buttons.toString()).apply(); render(); }
     private void toast(String value) { Toast.makeText(this, value, Toast.LENGTH_LONG).show(); }
-    @Override protected void onDestroy() { worker.shutdown(); super.onDestroy(); }
+    @Override protected void onDestroy() { stopHolding(); worker.shutdown(); super.onDestroy(); }
 }
